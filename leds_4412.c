@@ -15,69 +15,92 @@
 #include <mach/gpio.h>
 #include <plat/gpio-cfg.h>
 
-static int led_gpios[] = {
-	EXYNOS4212_GPM4(0),
-	EXYNOS4212_GPM4(1),
-	EXYNOS4212_GPM4(2),
-	EXYNOS4212_GPM4(3),
+#include <linux/leds.h>
+
+struct led_desc {
+	int gpio;
+	char *name;
 };
 
-static int led_open(struct inode *inode, struct file *file)
+static struct led_desc led_gpios[] = {
+	{EXYNOS4212_GPM4(0), "led1"},
+	{EXYNOS4212_GPM4(1), "led2"},
+	{EXYNOS4212_GPM4(2), "led3"},
+	{EXYNOS4212_GPM4(3), "led4"},
+};
+
+struct led_classdev_4412 {
+	struct led_classdev cdev;
+	int gpio;
+};
+
+
+static struct led_classdev_4412 *led_devs;
+static void	 brightness_set_4412(struct led_classdev *led_cdev,
+			  enum led_brightness brightness)
 {
-	/* 配置GPIO为输出引脚 */
+	struct led_classdev_4412 *dev = (struct led_classdev_4412 *)led_cdev;
+
+	led_cdev->brightness = brightness;
+
+	if (brightness != LED_OFF)
+		gpio_set_value(dev->gpio, 0);
+	else
+		gpio_set_value(dev->gpio, 1);
+}
+
+
+static int leds_init(void)
+{
 	int i;
-	for (i = 0; i < 4; i++)
-		s3c_gpio_cfgpin(led_gpios[i], S3C_GPIO_OUTPUT);
+	int ret;
+	
+	/* 1. alloc led_classdev */
+	led_devs = kzalloc(sizeof(struct led_classdev_4412) * sizeof(led_gpios)/sizeof(led_gpios[0]), GFP_KERNEL);
+	if (led_devs == NULL) {
+		printk("No memory for device\n");
+		return -ENOMEM;
+	}
+	
+	for (i = 0; i < sizeof(led_gpios)/sizeof(led_gpios[0]); i++)
+	{
+
+		s3c_gpio_cfgpin(led_gpios[i].gpio, S3C_GPIO_OUTPUT);
+		gpio_set_value(led_gpios[i].gpio, 1);
+
+		/* 2. set */
+		led_devs[i].cdev.max_brightness = LED_FULL;
+		led_devs[i].cdev.brightness_set = brightness_set_4412;
+		led_devs[i].cdev.flags = LED_CORE_SUSPENDRESUME;
+		led_devs[i].cdev.brightness = LED_OFF;
+		led_devs[i].cdev.name = led_gpios[i].name;
+		//led_devs[i].cdev.default_trigger = "timer";
+		led_devs[i].gpio = led_gpios[i].gpio;
+
+		/* 3. led_classdev_register */
+		ret = led_classdev_register(NULL, &led_devs[i].cdev);
+		if (ret) {
+			i--;
+			while (i >= 0) {
+				led_classdev_unregister(&led_devs[i].cdev);
+				i--;
+			}
+			kfree(led_devs);
+			return -EIO;
+		}
+	}
 	
 	return 0;
 }
 
-/* app : ioctl(fd, cmd, arg) */
-static long led_ioctl(struct file *filp, unsigned int cmd,
-		unsigned long arg)
+static void leds_exit(void)
 {
-	/* 根据传入的参数设置GPIO */
-	/* cmd : 0-off, 1-on */
-	/* arg : 0-3, which led */
-
-	if ((cmd != 0) && (cmd != 1))
-		return -EINVAL;
-	
-	if (arg > 4)
-		return -EINVAL;
-	
-	gpio_set_value(led_gpios[arg], !cmd);
-	
-	return 0;
-}
-
-static struct file_operations leds_ops = {
-    .owner  =   THIS_MODULE,    /* 这是一个宏，推向编译模块时自动创建的__this_module变量 */
-    .open   =   led_open,     
-	.unlocked_ioctl	= led_ioctl,
-	
-};
-
-static int major;
-static struct class *cls;
-
-int leds_init(void)
-{
-	major = register_chrdev(0, "leds", &leds_ops);
-
-	/* 为了让系统udev,mdev给我们创建设备节点 */
-	/* 创建类, 在类下创建设备 : /sys */
-	cls = class_create(THIS_MODULE, "leds");
-	device_create(cls, NULL, MKDEV(major, 0), NULL, "leds"); /* /dev/leds */
-	
-	return 0;
-}
-
-void leds_exit(void)
-{
-	device_destroy(cls, MKDEV(major, 0));
-	class_destroy(cls);
-	unregister_chrdev(major, "leds");
+	int i;
+	for (i = 0; i < sizeof(led_gpios)/sizeof(led_gpios[0]); i++)
+	{
+		led_classdev_unregister(&led_devs[i].cdev);
+	}
+	kfree(led_devs);
 }
 
 module_init(leds_init);
